@@ -27,6 +27,8 @@ $http = Net::HTTP.new($opts[:host], $opts[:port])
 $config = {}
 
 class Tank
+  OPEN_SPACE = %w(_ B)        # stuff you can walk into
+  LASER_AVOID_DISTANCE = 10   # evade lasers at least this close
   MAX_FIRE_DISTANCE = 10      # don't fire from further away to reduce chances of evasion
   MIN_ENERGY_FRACTION = 0.25  # go into defensive mode if we have less total energy than this
   HYST_ENERGY_FRACTION = 0.80 # hysteresis value for returning to aggressive mode after collecting batteries
@@ -55,6 +57,7 @@ class Tank
   
   def do_something!
     action = fire!
+    action ||= evade_enemy_fire
     action ||= hunt_down_enemy
     action ||= collect_batteries
     action ||= cower_in_fear
@@ -68,6 +71,24 @@ class Tank
   	  @mode = "fire!"
   	  'fire'
   	end
+  end
+
+  # don't get shot in the back
+  def evade_enemy_fire
+    my_left = turn_effect(@orientation, 'left')
+    my_right = turn_effect(@orientation, 'right')
+    if OPEN_SPACE.include?(look_ahead(1)) && (inbound_fire?(my_left) || inbound_fire?(my_right))
+      @mode = "evade_enemy_fire"
+      'move'
+    elsif inbound_fire?(opposite_direction(@orientation))
+      if OPEN_SPACE.include?(look(my_left, 1))
+        @mode = "evade_enemy_fire"
+        'left'
+      elsif OPEN_SPACE.include?(look(my_right, 1))
+        @mode = "evade_enemy_fire"
+        'right'
+      end
+    end
   end
 
   # if health and energy are in a decent state, hunt down the enemy
@@ -132,6 +153,7 @@ class Tank
   def parse_grid
     @grid = @status['grid'].split("\n")
     @dimensions = [@grid.size, @grid[0].size]
+    @old_lasers = @lasers
     @lasers = []
     @batts  = []
     @grid.each_with_index do |line, row|
@@ -182,8 +204,13 @@ class Tank
   
   # returns string of current field of vision
   def look_ahead(distance = nil)
-    distance ||= @dimensions[orientation_axis]
-    delta = orientation_delta
+    look(@orientation, distance)
+  end
+
+  # look in an arbitrary direction from my location
+  def look(direction, distance = nil)
+    distance ||= @dimensions[orientation_axis(direction)]
+    delta = orientation_delta(direction)
     coords = @pos.dup
     result = ''
     distance.times do
@@ -198,6 +225,28 @@ class Tank
   def enemy_in_crosshairs?
     puts "crosshairs: " + look_ahead(MAX_FIRE_DISTANCE)
     look_ahead(MAX_FIRE_DISTANCE) =~ /\A[_L]*O/
+  end
+
+  def inbound_fire?(direction)
+    delta = orientation_delta(direction)
+    coords = @pos.dup
+    LASER_AVOID_DISTANCE.times do
+      coords = wrap_add(coords, delta)
+      char = grid_at coords
+      return false if %w(B W).include?(char)
+      if char == 'L'
+        # project backward and see if the laser is moving toward us
+        coords = wrap_add(coords, delta)  # intermediate space
+        char = grid_at coords
+        return false if %w(B W).include?(char)
+        return true if char == 'O'
+        coords = wrap_add(coords, delta)  # laser's previous space, if moving toward us
+        char = grid_at coords
+        return true if char == 'O'
+        return @old_lasers.include?(coords)
+      end
+    end
+    false
   end
 
   DIRS = ['north', 'west', 'south', 'east'] # ccw order
@@ -216,6 +265,11 @@ class Tank
     return start_orientation unless %w(right left).include? turn
     si = DIRS.index(start_orientation)
     DIRS[(si + ((turn == 'left') ? 1 : 3)) % 4]
+  end
+
+  def opposite_direction(start_orientation)
+    si = DIRS.index(start_orientation)
+    DIRS[(si + 2) % 4]
   end
 
   def move_toward(coords)
@@ -286,7 +340,7 @@ class Tank
         # try moving forward, if the way ahead is open
         new_position = wrap_add state.position, orientation_delta(state.orientation)
         return state.history + ['move'] if new_position == goal_pos
-        if %w(_ B).include?(grid_at(new_position)) && !visited.include?([new_position, state.orientation])
+        if OPEN_SPACE.include?(grid_at(new_position)) && !visited.include?([new_position, state.orientation])
           new_state = State.new(new_position, state.orientation, state.history + ['move'])
           queue.push new_state, priority.(new_state)
         end
